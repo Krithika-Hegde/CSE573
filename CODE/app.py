@@ -31,16 +31,73 @@ def get_chroma_collection():
 
 collection = get_chroma_collection()
 
+# ── Job-query detection ───────────────────────────────────────────────────────
+_JOB_KEYWORDS = {
+    "job", "jobs", "hiring", "hire", "role", "roles", "position", "positions",
+    "career", "careers", "engineer", "developer", "scientist", "analyst",
+    "salary", "remote", "internship", "recruit", "opening", "vacancy",
+    "apply", "work at", "join us", "full-time", "part-time", "contract",
+}
+
+def is_job_query(query: str) -> bool:
+    q = query.lower()
+    return any(kw in q for kw in _JOB_KEYWORDS)
+
+
+# ── HybridSearchEngine loader ────────────────────────────────────────────────
+@st.cache_resource
+def get_hybrid_engine():
+    try:
+        from utilities.hybrid_search import HybridSearchEngine
+        engine = HybridSearchEngine()
+        print("[HybridSearch] Engine loaded successfully.")
+        return engine
+    except Exception as e:
+        print(f"[HybridSearch] Could not load engine: {e}")
+        return None
+
 def get_rag_response(user_query):
     if not collection:
         return "ChromaDB connection is not available."
     
     try:
-        sources = ["LinkedIn", "TechCrunch", "JobBoards", "StartupGallery", "Reddit"]
+        job_query = is_job_query(user_query)
+        # For job queries, HybridSearchEngine handles JobBoards; ChromaDB handles the rest.
+        # For non-job queries, ChromaDB handles all sources including JobBoards.
+        chroma_sources = ["LinkedIn", "TechCrunch", "StartupGallery", "Reddit"]
+        if not job_query:
+            chroma_sources.append("JobBoards")
+
         all_documents = []
         all_metadatas = []
-        
-        for source in sources:
+
+        # ── Hybrid job results (keyword + graph + vector) ─────────────────────
+        if job_query:
+            engine = get_hybrid_engine()
+            if engine:
+                hybrid = engine.hybrid_search(user_query, n_results=5)
+                for r in hybrid.get("results", []):
+                    doc = (
+                        f"{r.get('title', '')} at {r.get('company', '')}\n"
+                        f"{r.get('snippet', '')}"
+                    )
+                    meta = {
+                        "source": "JobBoards",
+                        "author_name": r.get("company", ""),
+                        "post_url": r.get("url", ""),
+                        "job_title": r.get("title", ""),
+                        "role_category": r.get("role_category", ""),
+                        "search_methods": ", ".join(r.get("methods", [])),
+                        "hybrid_score": str(r.get("combined_score", "")),
+                    }
+                    all_documents.append(doc)
+                    all_metadatas.append(meta)
+            else:
+                # Engine unavailable — fall back to ChromaDB for JobBoards
+                chroma_sources.append("JobBoards")
+
+        # ── ChromaDB retrieval for all other sources ──────────────────────────
+        for source in chroma_sources:
             try:
                 results = collection.query(
                     query_texts=[user_query],
