@@ -44,6 +44,21 @@ def is_job_query(query: str) -> bool:
     return any(kw in q for kw in _JOB_KEYWORDS)
 
 
+# ── Multi-hop query detection ─────────────────────────────────────────────────
+_MULTIHOP_PATTERNS = [
+    "both", "and also", "that require", "that mention", "that include",
+    "with both", "who also", "that also", "requiring both", "require both",
+    "mention both", "include both", "need both", "combining",
+]
+
+def is_multihop_query(query: str) -> bool:
+    """Returns True for job queries that combine multiple independent conditions."""
+    if not is_job_query(query):
+        return False
+    q = query.lower()
+    return any(p in q for p in _MULTIHOP_PATTERNS)
+
+
 # ── HybridSearchEngine loader ────────────────────────────────────────────────
 @st.cache_resource
 def get_hybrid_engine():
@@ -71,12 +86,16 @@ def get_rag_response(user_query):
         all_documents = []
         all_metadatas = []
 
-        # ── Hybrid job results (keyword + graph + vector) ─────────────────────
+        # ── Job results: multi-hop or hybrid ────────────────────────────────────
         if job_query:
             engine = get_hybrid_engine()
             if engine:
-                hybrid = engine.hybrid_search(user_query, n_results=5)
-                for r in hybrid.get("results", []):
+                multihop = is_multihop_query(user_query)
+                if multihop:
+                    search_result = engine.multi_hop_search(user_query, n_results=5)
+                else:
+                    search_result = engine.hybrid_search(user_query, n_results=5)
+                for r in search_result.get("results", []):
                     doc = (
                         f"{r.get('title', '')} at {r.get('company', '')}\n"
                         f"{r.get('snippet', '')}"

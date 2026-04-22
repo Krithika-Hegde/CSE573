@@ -190,3 +190,104 @@ class HybridSearchEngine:
             "results": final,
             "total_results": len(final),
         }
+
+    # ------------------------------------------------------------------
+    def multi_hop_search(self, query: str, n_results: int = 5) -> Dict:
+        """
+        Multi-hop search: filters jobs that satisfy multiple independent
+        conditions extracted from the query.
+
+        Hop dimensions:
+          - title keywords  (role-type words)
+          - skill keywords  (tech stack terms)
+          - location terms  (city names, 'remote', 'united states')
+
+        Jobs are ranked by how many hop dimensions they satisfy (all
+        dimensions must score > 0 before a job is returned). Falls back
+        to single-hop keyword results when fewer than 2 dimensions are
+        detected in the query.
+        """
+        if self.jobs_df is None:
+            return {"query": query, "results": [], "total_results": 0, "hops": {}}
+
+        q_lower = query.lower()
+
+        # ── Extract per-dimension terms ───────────────────────────────
+        _TITLE_WORDS = [
+            "machine learning", "software", "data", "infrastructure", "engineering",
+            "research", "platform", "security", "design", "product", "devops",
+            "cloud", "electrical", "mechanical", "construction", "operations",
+            "manager", "lead", "senior", "staff", "scientist", "analyst",
+        ]
+        title_kws = [kw for kw in _TITLE_WORDS if kw in q_lower]
+        skill_kws = [kw for kw in _TECH_KEYWORDS if kw in q_lower]
+
+        location_kws: List[str] = []
+        if "remote" in q_lower:
+            location_kws.append("remote")
+        for term in ["united states", "u.s.", "memphis", "palo alto", "new york",
+                     "san francisco", "seattle", "austin", "boston"]:
+            if term in q_lower:
+                location_kws.append(term)
+
+        active_hops = (
+            [("title", title_kws)] if title_kws else []
+        ) + (
+            [("skill", skill_kws)] if skill_kws else []
+        ) + (
+            [("location", location_kws)] if location_kws else []
+        )
+
+        # Not enough distinct hop dimensions — fall back to hybrid
+        if len(active_hops) < 2:
+            fallback = self.hybrid_search(query, n_results=n_results)
+            return {**fallback, "hops": {"note": "fell back to hybrid (< 2 hop dimensions)"}}
+
+        # ── Score each job ────────────────────────────────────────────
+        scored = []
+        for _, row in self.jobs_df.iterrows():
+            title_text = str(row.get("title", "")).lower()
+            desc_text = str(row.get("description", "")).lower()
+            loc_text = str(row.get("location", "")).lower()
+            combined = title_text + " " + desc_text
+
+            hop_scores: List[int] = []
+            for hop_name, kws in active_hops:
+                if hop_name == "location":
+                    hop_scores.append(sum(1 for kw in kws if kw in loc_text))
+                else:
+                    hop_scores.append(sum(1 for kw in kws if kw in combined))
+
+            satisfied = sum(1 for s in hop_scores if s > 0)
+            total = sum(hop_scores)
+            if satisfied >= 2:
+                scored.append((satisfied, total, row))
+
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+
+        results = []
+        for rank, (satisfied, total, row) in enumerate(scored[:n_results], 1):
+            results.append({
+                "rank": rank,
+                "method": "multi_hop",
+                "methods": ["multi_hop"],
+                "score": total,
+                "combined_score": round(satisfied / len(active_hops), 3),
+                "title": row.get("title", "N/A"),
+                "company": row.get("company", "N/A"),
+                "url": row.get("job_url", "N/A"),
+                "snippet": str(row.get("description", ""))[:200],
+                "role_category": row.get("role_category", "N/A"),
+                "location": row.get("location", "N/A"),
+            })
+
+        return {
+            "query": query,
+            "results": results,
+            "total_results": len(results),
+            "hops": {
+                "title_keywords": title_kws,
+                "skill_keywords": skill_kws,
+                "location_keywords": location_kws,
+            },
+        }
